@@ -11,7 +11,6 @@ const envSchema = z.object({
   RPC_URL: z.string().default('https://rpc.frax.com'),
   PRIVATE_KEY: z.string().startsWith('0x').min(1, 'PRIVATE_KEY is required'),
   MAIN_TOKEN_ADDRESS: z.string().min(1, 'MAIN_TOKEN_ADDRESS is required'),
-  GAS_TOKEN_ADDRESS: z.string().min(1, 'GAS_TOKEN_ADDRESS is required'),
   DEBUG: z.coerce.boolean().default(false)
 });
 
@@ -28,6 +27,18 @@ interface BatchSendConfig {
     mainTokenAmount: string; // Amount of main token (e.g., "100" for 100 tokens)
     nativeAmount: string;     // Amount of native gas token in ether (e.g., "0.001" for 0.001 ETH)
   }>;
+}
+
+interface AirdropResult {
+  recipient: Address;
+  mainTokenAmount: string;
+  nativeAmount: string;
+  mainTokenHash?: string;
+  nativeHash?: string;
+  mainTokenSuccess: boolean;
+  nativeSuccess: boolean;
+  status: 'success' | 'failed';
+  error?: string;
 }
 
 async function batchSendTokens(config: BatchSendConfig) {
@@ -102,7 +113,7 @@ async function batchSendTokens(config: BatchSendConfig) {
     console.log(`\n✅ Sufficient balance for both tokens. Starting airdrop...\n`);
 
     // Send tokens to each recipient
-    const results = [];
+    const results: AirdropResult[] = [];
     for (let i = 0; i < recipients.length; i++) {
       const recipient = recipients[i];
       console.log(`[${i + 1}/${recipients.length}] Airdropping to ${recipient.address}...`);
@@ -150,6 +161,8 @@ async function batchSendTokens(config: BatchSendConfig) {
           nativeAmount: recipient.nativeAmount,
           mainTokenHash: txHashes.main,
           nativeHash: txHashes.native,
+          mainTokenSuccess: true,
+          nativeSuccess: true,
           status: 'success'
         });
       } catch (error) {
@@ -200,7 +213,7 @@ async function main() {
         nativeAmount: '0.001'
       },
       {
-        address: '0xc1b4d877f267c998a2cde3762622e0c0aa0d65e0' as Address,
+        address: '0x8ba1f109551bD432803012645Ac136ddd64DBA72' as Address,
         mainTokenAmount: '50',
         nativeAmount: '0.001'
       },
