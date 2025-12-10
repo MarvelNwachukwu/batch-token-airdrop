@@ -1,7 +1,7 @@
 import { config as loadEnv } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { createWalletClient, createPublicClient, http, parseUnits, type Address, formatUnits, type Hex } from 'viem';
+import { createWalletClient, createPublicClient, http, parseUnits, type Address, formatUnits, type Hex, erc20Abi, parseEther, formatEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { fraxtal } from 'viem/chains';
 
@@ -17,49 +17,21 @@ const envSchema = z.object({
 
 const env = envSchema.parse(process.env);
 
-// ERC20 ABI for transfer function
-const ERC20_ABI = [
-  {
-    inputs: [
-      { name: 'to', type: 'address' },
-      { name: 'amount', type: 'uint256' }
-    ],
-    name: 'transfer',
-    outputs: [{ name: '', type: 'bool' }],
-    stateMutability: 'nonpayable',
-    type: 'function'
-  },
-  {
-    inputs: [{ name: 'account', type: 'address' }],
-    name: 'balanceOf',
-    outputs: [{ name: '', type: 'uint256' }],
-    stateMutability: 'view',
-    type: 'function'
-  },
-  {
-    inputs: [],
-    name: 'decimals',
-    outputs: [{ name: '', type: 'uint8' }],
-    stateMutability: 'view',
-    type: 'function'
-  }
-] as const;
 
 interface BatchSendConfig {
   chainId: number;
   rpcUrl: string;
   privateKey: Hex;
   mainTokenAddress: Address;
-  gasTokenAddress: Address;
   recipients: Array<{
     address: Address;
     mainTokenAmount: string; // Amount of main token (e.g., "100" for 100 tokens)
-    gasTokenAmount: string;  // Amount of gas token (e.g., "50" for 50 tokens)
+    nativeAmount: string;     // Amount of native gas token in ether (e.g., "0.001" for 0.001 ETH)
   }>;
 }
 
 async function batchSendTokens(config: BatchSendConfig) {
-  const { chainId, rpcUrl, privateKey, mainTokenAddress, gasTokenAddress, recipients } = config;
+  const { chainId, rpcUrl, privateKey, mainTokenAddress, recipients } = config;
 
   // Setup account
   const account = privateKeyToAccount(privateKey);
@@ -80,64 +52,51 @@ async function batchSendTokens(config: BatchSendConfig) {
   console.log(`📍 Network: Chain ID ${chainId}`);
   console.log(`👛 Sender: ${account.address}`);
   console.log(`🪙 Main Token: ${mainTokenAddress}`);
-  console.log(`⛽ Gas Token: ${gasTokenAddress}`);
+  console.log(`⛽ Native Token: Native currency`);
   console.log(`📊 Recipients: ${recipients.length}\n`);
 
   try {
-    // Get token decimals for both tokens
-    const [mainDecimals, gasDecimals] = await Promise.all([
+    // Get main token decimals
+    const mainDecimals = await publicClient.readContract({
+      address: mainTokenAddress,
+      abi: erc20Abi,
+      functionName: 'decimals'
+    });
+
+    console.log(`Main token decimals: ${mainDecimals}\n`);
+
+    // Check sender balances
+    const [mainBalance, nativeBalance] = await Promise.all([
       publicClient.readContract({
         address: mainTokenAddress,
-        abi: ERC20_ABI,
-        functionName: 'decimals'
-      }),
-      publicClient.readContract({
-        address: gasTokenAddress,
-        abi: ERC20_ABI,
-        functionName: 'decimals'
-      })
-    ]);
-
-    console.log(`Main token decimals: ${mainDecimals}`);
-    console.log(`Gas token decimals: ${gasDecimals}\n`);
-
-    // Check sender balances for both tokens
-    const [mainBalance, gasBalance] = await Promise.all([
-      publicClient.readContract({
-        address: mainTokenAddress,
-        abi: ERC20_ABI,
+        abi: erc20Abi,
         functionName: 'balanceOf',
         args: [account.address]
       }),
-      publicClient.readContract({
-        address: gasTokenAddress,
-        abi: ERC20_ABI,
-        functionName: 'balanceOf',
-        args: [account.address]
-      })
+      publicClient.getBalance({ address: account.address })
     ]);
 
     console.log(`Your main token balance: ${formatUnits(mainBalance, mainDecimals)} tokens`);
-    console.log(`Your gas token balance: ${formatUnits(gasBalance, gasDecimals)} tokens\n`);
+    console.log(`Your native balance: ${formatEther(nativeBalance)} ETH\n`);
 
     // Calculate total amounts needed
     const totalMainAmount = recipients.reduce((sum, recipient) => {
       return sum + parseUnits(recipient.mainTokenAmount, mainDecimals);
     }, 0n);
 
-    const totalGasAmount = recipients.reduce((sum, recipient) => {
-      return sum + parseUnits(recipient.gasTokenAmount, gasDecimals);
+    const totalNativeAmount = recipients.reduce((sum, recipient) => {
+      return sum + parseEther(recipient.nativeAmount);
     }, 0n);
 
     console.log(`Total main token to send: ${formatUnits(totalMainAmount, mainDecimals)} tokens`);
-    console.log(`Total gas token to send: ${formatUnits(totalGasAmount, gasDecimals)} tokens`);
+    console.log(`Total native to send: ${formatEther(totalNativeAmount)} ETH`);
 
     if (mainBalance < totalMainAmount) {
       throw new Error(`Insufficient main token balance. Need ${formatUnits(totalMainAmount, mainDecimals)}, have ${formatUnits(mainBalance, mainDecimals)}`);
     }
 
-    if (gasBalance < totalGasAmount) {
-      throw new Error(`Insufficient gas token balance. Need ${formatUnits(totalGasAmount, gasDecimals)}, have ${formatUnits(gasBalance, gasDecimals)}`);
+    if (nativeBalance < totalNativeAmount) {
+      throw new Error(`Insufficient native balance. Need ${formatEther(totalNativeAmount)}, have ${formatEther(nativeBalance)}`);
     }
 
     console.log(`\n✅ Sufficient balance for both tokens. Starting airdrop...\n`);
@@ -148,18 +107,18 @@ async function batchSendTokens(config: BatchSendConfig) {
       const recipient = recipients[i];
       console.log(`[${i + 1}/${recipients.length}] Airdropping to ${recipient.address}...`);
       console.log(`  Main token: ${recipient.mainTokenAmount}`);
-      console.log(`  Gas token: ${recipient.gasTokenAmount}`);
+      console.log(`  Native: ${recipient.nativeAmount} ETH`);
 
-      const txHashes: { main?: string; gas?: string } = {};
+      const txHashes: { main?: string; native?: string } = {};
       let mainSuccess = false;
-      let gasSuccess = false;
+      let nativeSuccess = false;
       let errorMsg = '';
 
       try {
-        // Send main token
+        // Send main token (ERC20)
         const mainHash = await walletClient.writeContract({
           address: mainTokenAddress,
-          abi: ERC20_ABI,
+          abi: erc20Abi,
           functionName: 'transfer',
           args: [recipient.address, parseUnits(recipient.mainTokenAmount, mainDecimals)]
         });
@@ -171,28 +130,26 @@ async function batchSendTokens(config: BatchSendConfig) {
         console.log(`  ✓ Main token confirmed in block ${mainReceipt.blockNumber}`);
         mainSuccess = true;
 
-        // Send gas token
-        const gasHash = await walletClient.writeContract({
-          address: gasTokenAddress,
-          abi: ERC20_ABI,
-          functionName: 'transfer',
-          args: [recipient.address, parseUnits(recipient.gasTokenAmount, gasDecimals)]
+        // Send native currency
+        const nativeHash = await walletClient.sendTransaction({
+          to: recipient.address,
+          value: parseEther(recipient.nativeAmount)
         });
-        txHashes.gas = gasHash;
-        console.log(`  ✓ Gas token tx: ${gasHash}`);
+        txHashes.native = nativeHash;
+        console.log(`  ✓ Native tx: ${nativeHash}`);
 
-        // Wait for gas token confirmation
-        const gasReceipt = await publicClient.waitForTransactionReceipt({ hash: gasHash });
-        console.log(`  ✓ Gas token confirmed in block ${gasReceipt.blockNumber}`);
-        gasSuccess = true;
+        // Wait for native confirmation
+        const nativeReceipt = await publicClient.waitForTransactionReceipt({ hash: nativeHash });
+        console.log(`  ✓ Native confirmed in block ${nativeReceipt.blockNumber}`);
+        nativeSuccess = true;
         console.log(`  ✅ Airdrop complete\n`);
 
         results.push({
           recipient: recipient.address,
           mainTokenAmount: recipient.mainTokenAmount,
-          gasTokenAmount: recipient.gasTokenAmount,
+          nativeAmount: recipient.nativeAmount,
           mainTokenHash: txHashes.main,
-          gasTokenHash: txHashes.gas,
+          nativeHash: txHashes.native,
           status: 'success'
         });
       } catch (error) {
@@ -201,11 +158,11 @@ async function batchSendTokens(config: BatchSendConfig) {
         results.push({
           recipient: recipient.address,
           mainTokenAmount: recipient.mainTokenAmount,
-          gasTokenAmount: recipient.gasTokenAmount,
+          nativeAmount: recipient.nativeAmount,
           mainTokenHash: txHashes.main,
-          gasTokenHash: txHashes.gas,
+          nativeHash: txHashes.native,
           mainTokenSuccess: mainSuccess,
-          gasTokenSuccess: gasSuccess,
+          nativeSuccess: nativeSuccess,
           status: 'failed',
           error: errorMsg
         });
@@ -236,17 +193,16 @@ async function main() {
     rpcUrl: env.RPC_URL,
     privateKey: env.PRIVATE_KEY as Hex,
     mainTokenAddress: env.MAIN_TOKEN_ADDRESS as Address,
-    gasTokenAddress: env.GAS_TOKEN_ADDRESS as Address,
     recipients: [
       {
         address: '0xc1b4d877f267c998a2cde3762622e0c0aa0d65e0' as Address,
         mainTokenAmount: '100',
-        gasTokenAmount: '0.001'
+        nativeAmount: '0.001'
       },
       {
-        address: '0x2a175aea05465fc6ccfaa1de550bf611aa379a18' as Address,
+        address: '0xc1b4d877f267c998a2cde3762622e0c0aa0d65e0' as Address,
         mainTokenAmount: '50',
-        gasTokenAmount: '0.001'
+        nativeAmount: '0.001'
       },
       // Add more recipients as needed
     ]
@@ -257,7 +213,6 @@ async function main() {
       chainId: config.chainId,
       rpcUrl: config.rpcUrl,
       mainTokenAddress: config.mainTokenAddress,
-      gasTokenAddress: config.gasTokenAddress,
       recipients: config.recipients
     });
   }
@@ -268,10 +223,6 @@ async function main() {
 
   if (!config.mainTokenAddress) {
     throw new Error('MAIN_TOKEN_ADDRESS environment variable is required');
-  }
-
-  if (!config.gasTokenAddress) {
-    throw new Error('GAS_TOKEN_ADDRESS environment variable is required');
   }
 
   await batchSendTokens(config);
